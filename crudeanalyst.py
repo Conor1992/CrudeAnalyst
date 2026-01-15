@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 st.title("🛢️ Crude Oil Analyst Dashboard")
-st.caption("Curves, spreads, indicators, correlations, comparison, and exports using Yahoo Finance only.")
+st.caption("Curves, spreads, indicators, volatility, correlations, forecasts, and scenarios using Yahoo Finance only.")
 
 # ---------------------------------------------------------
 # SIDEBAR CONTROLS
@@ -69,6 +69,8 @@ if start_date >= end_date:
 # ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+    if ticker is None:
+        return pd.DataFrame()
     t = yf.Ticker(ticker)
     return t.history(start=start, end=end, interval="1d")
 
@@ -120,6 +122,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 data = add_indicators(data)
+
+# Daily returns
+returns = data["Close"].pct_change().dropna()
 
 # ---------------------------------------------------------
 # PRICE & VOLUME
@@ -309,11 +314,11 @@ else:
     if corr_df.shape[0] < 2:
         st.info("No overlapping data across selected assets.")
     else:
-        returns = corr_df.pct_change().dropna(how="any")
-        if returns.empty:
+        corr_returns = corr_df.pct_change().dropna(how="any")
+        if corr_returns.empty:
             st.info("No overlapping return data across selected assets.")
         else:
-            corr_matrix = returns.corr()
+            corr_matrix = corr_returns.corr()
             st.write("Correlation matrix (daily returns):")
             st.dataframe(corr_matrix)
 
@@ -328,32 +333,170 @@ else:
             st.plotly_chart(fig_corr, use_container_width=True)
 
 # ---------------------------------------------------------
-# SIMPLE FORWARD PROJECTION
+# VOLATILITY ANALYTICS
 # ---------------------------------------------------------
-st.subheader("🔮 Simple forward projection")
+st.subheader("🌪 Volatility analytics")
+
+# GARCH-style EWMA volatility
+def ewma_vol(returns: pd.Series, lam: float = 0.94) -> pd.Series:
+    var_list = []
+    prev_var = returns.var()
+    for r in returns:
+        v = lam * prev_var + (1 - lam) * (r ** 2)
+        var_list.append(v)
+        prev_var = v
+    ewma = np.sqrt(np.array(var_list)) * np.sqrt(252)
+    return pd.Series(ewma, index=returns.index)
+
+ewma_series = ewma_vol(returns)
+data["EWMA_vol_annualized"] = ewma_series.reindex(data.index)
+
+# Realized volatility cones
+horizons = [10, 20, 60, 120]
+cone_df = pd.DataFrame(index=data.index)
+
+for h in horizons:
+    cone_df[f"Vol_{h}d"] = data["Close"].pct_change().rolling(h).std() * np.sqrt(252)
+
+fig_cone = px.line(
+    cone_df,
+    x=cone_df.index,
+    y=[c for c in cone_df.columns],
+    title="Realized volatility cones (annualized)",
+    labels={"value": "Volatility", "index": "Date", "variable": "Horizon"}
+)
+st.plotly_chart(fig_cone, use_container_width=True)
+
+# Volatility regime detection (based on 20d vol)
+vol_series = data["Vol_20d_annualized"].dropna()
+if not vol_series.empty:
+    low_thr = vol_series.quantile(0.33)
+    high_thr = vol_series.quantile(0.66)
+
+    def classify_regime(v):
+        if v <= low_thr:
+            return "Low"
+        elif v >= high_thr:
+            return "High"
+        else:
+            return "Medium"
+
+    regime = vol_series.apply(classify_regime)
+    regime_counts = regime.value_counts()
+
+    st.write("Volatility regimes (based on 20d realized vol):")
+    st.bar_chart(regime_counts)
+
+    current_vol = vol_series.iloc[-1]
+    current_regime = classify_regime(current_vol)
+    st.metric("Current volatility regime", current_regime, f"{current_vol:.2%}")
+else:
+    st.info("Not enough data to classify volatility regimes.")
+
+# ---------------------------------------------------------
+# FORECASTING: EXP SMOOTHING, ROLLING AR, MONTE CARLO
+# ---------------------------------------------------------
+st.subheader("🔮 Forecasting & simulations")
 
 horizon_days = st.slider("Forecast horizon (days)", 5, 60, 30)
 
 last_date = data.index[-1]
 last_price = data["Close"][-1]
-recent_ret = data["Close"].pct_change().dropna().tail(60)
-avg_daily_ret = recent_ret.mean()
 
-future_dates = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
-future_prices = [last_price * ((1 + avg_daily_ret) ** i) for i in range(1, horizon_days + 1)]
+# Exponential smoothing forecast (on price)
+alpha = st.slider("Exponential smoothing alpha", 0.01, 0.5, 0.2)
+level = data["Close"].iloc[0]
+for p in data["Close"]:
+    level = alpha * p + (1 - alpha) * level
+exp_forecast_prices = [level for _ in range(horizon_days)]
+exp_dates = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
+exp_df = pd.DataFrame({"ExpSmooth": exp_forecast_prices}, index=exp_dates)
 
-future_df = pd.DataFrame({"Close": future_prices}, index=future_dates)
-proj_df = pd.concat([data[["Close"]].tail(60), future_df])
+# Rolling AR(1) forecast on returns
+window_ar = 60
+if len(returns) > window_ar + 1:
+    r_window = returns.tail(window_ar)
+    r_lag = r_window.shift(1).dropna()
+    r_curr = r_window.iloc[1:]
+    phi = (r_lag * r_curr).sum() / (r_lag ** 2).sum()
+    last_r = returns.iloc[-1]
+    ar_returns = [phi ** i * last_r for i in range(1, horizon_days + 1)]
+    ar_prices = []
+    p = last_price
+    for r in ar_returns:
+        p = p * (1 + r)
+        ar_prices.append(p)
+    ar_df = pd.DataFrame({"AR1": ar_prices}, index=exp_dates)
+else:
+    ar_df = pd.DataFrame(index=exp_dates)
+
+# Monte Carlo simulation
+mc_paths = st.slider("Monte Carlo paths", 50, 500, 200)
+mu = returns.mean()
+sigma = returns.std()
+dt = 1.0
+
+mc_matrix = np.zeros((horizon_days, mc_paths))
+for j in range(mc_paths):
+    prices = [last_price]
+    for i in range(1, horizon_days):
+        shock = np.random.normal(mu * dt, sigma * np.sqrt(dt))
+        prices.append(prices[-1] * (1 + shock))
+    mc_matrix[:, j] = prices
+
+mc_index = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
+mc_df = pd.DataFrame(mc_matrix, index=mc_index)
+mc_median = mc_df.median(axis=1)
+mc_p10 = mc_df.quantile(0.1, axis=1)
+mc_p90 = mc_df.quantile(0.9, axis=1)
+
+forecast_df = pd.DataFrame({"Historical": data["Close"].tail(60)})
+forecast_df = forecast_df.append(
+    pd.DataFrame(
+        {
+            "ExpSmooth": exp_df["ExpSmooth"],
+            "AR1": ar_df["AR1"] if "AR1" in ar_df.columns else np.nan,
+            "MC_median": mc_median,
+            "MC_p10": mc_p10,
+            "MC_p90": mc_p90,
+        }
+    )
+)
 
 fig_forecast = px.line(
-    proj_df,
-    x=proj_df.index,
-    y="Close",
-    title=f"{benchmark_label} – historical & simple projection",
-    labels={"Close": "Price (USD)", "index": "Date"}
+    forecast_df,
+    x=forecast_df.index,
+    y=["Historical", "ExpSmooth", "AR1", "MC_median", "MC_p10", "MC_p90"],
+    title=f"{benchmark_label} – forecasts & Monte Carlo bands",
+    labels={"value": "Price (USD)", "index": "Date", "variable": "Series"}
 )
 st.plotly_chart(fig_forecast, use_container_width=True)
-st.caption("Projection uses average daily return over the last 60 trading days (naive, not a full econometric model).")
+
+st.caption("ExpSmooth = exponential smoothing level; AR1 = rolling AR(1) on returns; MC bands = 10th/90th percentiles of simulated paths.")
+
+# ---------------------------------------------------------
+# SCENARIO ANALYSIS
+# ---------------------------------------------------------
+st.subheader("🧮 Scenario analysis")
+
+st.write("Simple what-if on crude vs USD and OPEC supply (illustrative elasticities).")
+
+usd_change = st.slider("USD index change (%)", -10.0, 10.0, 0.0, step=0.5)
+opec_change = st.slider("OPEC supply change (mbpd)", -3.0, 3.0, 0.0, step=0.1)
+
+# Very rough illustrative elasticities (you can tune these):
+beta_usd = -0.3   # crude % change per 1% USD move
+beta_opec = -0.02 # crude % change per 1 mbpd OPEC change
+
+price_impact_pct = beta_usd * usd_change + beta_opec * opec_change
+scenario_price = last_price * (1 + price_impact_pct / 100.0)
+
+col_s1, col_s2, col_s3 = st.columns(3)
+col_s1.metric("Current price", f"${last_price:.2f}")
+col_s2.metric("Scenario price", f"${scenario_price:.2f}")
+col_s3.metric("Price impact", f"{price_impact_pct:.2f}%")
+
+st.caption("Elasticities are placeholders; adjust beta_usd and beta_opec in code to match your own views or regressions.")
 
 # ---------------------------------------------------------
 # EXPORT DATA
