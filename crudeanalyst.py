@@ -540,10 +540,24 @@ elif page == "5. Factor Risk & Advanced Forecasts":
 
         # Factor contribution to variance (very rough)
         cov = ret.cov()
-        factor_var = cov.iloc[1:, 1:].values
-        w = betas.reshape(-1, 1)
-        total_var = float(w.T @ factor_var @ w)
-        st.write("Approximate factor variance contribution:", total_var)
+        # Extract factor covariance matrix (drop crude column)
+        factor_cov = cov.iloc[1:, 1:] 
+# Drop any rows/cols with NaN or zero variance
+        factor_cov = factor_cov.loc[(factor_cov.var(axis=1) > 0),(factor_cov.var(axis=0) > 0)]
+
+# Align betas to surviving factors
+        valid_factors = factor_cov.index
+        betas_series = pd.Series(betas, index=cov.columns[1:])
+        betas_series = betas_series.loc[valid_factors]
+
+# If fewer than 1 factor survives, skip
+        if len(betas_series) < 1:
+            st.info("Not enough valid factors to compute factor variance contribution."
+        else:
+            w = betas_series.values.reshape(-1, 1)
+            F = factor_cov.values
+            total_var = float(w.T @ F @ w)
+            st.write("Approximate factor variance contribution:", total_var)
     else:
         st.info("Not enough data for full factor model (USD/SPX/Gold).")
 
