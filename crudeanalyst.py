@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 st.title("🛢️ Crude Oil Analyst Dashboard")
-st.caption("Crude benchmarks, spreads, indicators, comparison, and exports using Yahoo Finance data only.")
+st.caption("Crude benchmarks, curves, spreads, indicators, comparison, correlations, and exports using Yahoo Finance data only.")
 
 # ---------------------------------------------------------
 # SIDEBAR CONTROLS
@@ -38,7 +38,9 @@ comparison_map = {
     "WTI (CL=F)": "CL=F",
     "US Dollar Index (DX-Y.NYB)": "DX-Y.NYB",
     "S&P 500 (^GSPC)": "^GSPC",
-    "Euro Stoxx 50 (^STOXX50E)": "^STOXX50E"
+    "Euro Stoxx 50 (^STOXX50E)": "^STOXX50E",
+    "Gold (GC=F)": "GC=F",
+    "NatGas (NG=F)": "NG=F"
 }
 
 comparison_label = st.sidebar.selectbox(
@@ -46,6 +48,28 @@ comparison_label = st.sidebar.selectbox(
     list(comparison_map.keys())
 )
 comparison_ticker = comparison_map[comparison_label]
+
+# Assets for correlation matrix
+st.sidebar.markdown("---")
+st.sidebar.subheader("Correlation matrix assets")
+
+corr_assets_map = {
+    "WTI (CL=F)": "CL=F",
+    "Brent (BZ=F)": "BZ=F",
+    "US Dollar Index (DX-Y.NYB)": "DX-Y.NYB",
+    "S&P 500 (^GSPC)": "^GSPC",
+    "Euro Stoxx 50 (^STOXX50E)": "^STOXX50E",
+    "Gold (GC=F)": "GC=F",
+    "NatGas (NG=F)": "NG=F"
+}
+
+corr_default = ["WTI (CL=F)", "Brent (BZ=F)", "US Dollar Index (DX-Y.NYB)", "S&P 500 (^GSPC)"]
+
+corr_selected_labels = st.sidebar.multiselect(
+    "Select assets for correlation",
+    list(corr_assets_map.keys()),
+    default=corr_default
+)
 
 start_date = st.sidebar.date_input(
     "Start Date",
@@ -172,9 +196,13 @@ with tab_macd:
 
 with tab_bb:
     bb_df = data[["Close", "BB_upper", "BB_mid", "BB_lower"]].dropna()
-    fig_bb = px.line(bb_df, x=bb_df.index, y=["Close", "BB_upper", "BB_mid", "BB_lower"],
-                     labels={"value": "Price (USD)", "index": "Date", "variable": "Series"},
-                     title="Bollinger Bands")
+    fig_bb = px.line(
+        bb_df,
+        x=bb_df.index,
+        y=["Close", "BB_upper", "BB_mid", "BB_lower"],
+        labels={"value": "Price (USD)", "index": "Date", "variable": "Series"},
+        title="Bollinger Bands"
+    )
     st.plotly_chart(fig_bb, use_container_width=True)
 
 with tab_vol:
@@ -230,7 +258,96 @@ else:
     st.info("Select a comparison asset in the sidebar to see normalized performance.")
 
 # ---------------------------------------------------------
-# SIMPLE FORECAST (NAIVE EXTENSION)
+# MULTI-CONTRACT FUTURES CURVE
+# ---------------------------------------------------------
+st.subheader("🧵 Futures Curve (Multi-Contract)")
+
+curve_underlying = st.selectbox(
+    "Curve underlying",
+    ["WTI", "Brent"]
+)
+
+# NOTE: You can adjust these tickers to the exact contracts you care about.
+if curve_underlying == "WTI":
+    futures_contracts = {
+        "Front": "CL=F",          # Front month
+        "Jun 2025": "CLM25.NYM",
+        "Dec 2025": "CLZ25.NYM",
+        "Jun 2026": "CLM26.NYM",
+        "Dec 2026": "CLZ26.NYM"
+    }
+else:
+    futures_contracts = {
+        "Front": "BZ=F",          # Front month
+        "Jun 2025": "BZM25.NYM",
+        "Dec 2025": "BZZ25.NYM",
+        "Jun 2026": "BZM26.NYM",
+        "Dec 2026": "BZZ26.NYM"
+    }
+
+curve_prices = {}
+for label, ticker in futures_contracts.items():
+    try:
+        df_curve = get_history(ticker, date.today() - timedelta(days=10), date.today())
+        if not df_curve.empty:
+            curve_prices[label] = df_curve["Close"][-1]
+    except Exception:
+        continue
+
+if curve_prices:
+    curve_df = pd.DataFrame(
+        {"Contract": list(curve_prices.keys()), "Price": list(curve_prices.values())}
+    )
+    fig_curve = px.line(
+        curve_df,
+        x="Contract",
+        y="Price",
+        markers=True,
+        title=f"{curve_underlying} Futures Curve",
+        labels={"Price": "Price (USD/bbl)", "Contract": "Contract"}
+    )
+    st.plotly_chart(fig_curve, use_container_width=True)
+else:
+    st.info("No futures curve data available with current tickers. Adjust contract tickers in the code if needed.")
+
+# ---------------------------------------------------------
+# CORRELATION MATRIX
+# ---------------------------------------------------------
+st.subheader("🔗 Correlation Matrix (Daily Returns)")
+
+corr_tickers = {label: corr_assets_map[label] for label in corr_selected_labels}
+
+corr_closes = {}
+for label, ticker in corr_tickers.items():
+    try:
+        df_corr = get_history(ticker, start_date, end_date)
+        if not df_corr.empty:
+            corr_closes[label] = df_corr["Close"]
+    except Exception:
+        continue
+
+if len(corr_closes) >= 2:
+    corr_df = pd.DataFrame(corr_closes).dropna()
+    returns = corr_df.pct_change().dropna()
+    corr_matrix = returns.corr()
+
+    st.write("Correlation matrix (based on daily returns):")
+    st.dataframe(corr_matrix.style.background_gradient(cmap="RdBu_r", vmin=-1, vmax=1))
+
+    fig_corr = px.imshow(
+        corr_matrix,
+        text_auto=True,
+        color_continuous_scale="RdBu_r",
+        zmin=-1,
+        zmax=1,
+        title="Correlation Heatmap"
+    )
+    st.plotly_chart(fig_corr, use_container_width=True)
+else:
+    st.info("Select at least two valid assets for the correlation matrix.")
+
+# ---------------------------------------------------------
+# SIMPLE FORWARD PROJECTION
 # ---------------------------------------------------------
 st.subheader("🔮 Simple Forward Projection")
 
