@@ -356,7 +356,7 @@ else:
         corr_matrix = returns.corr()
 
         st.write("Correlation matrix (daily returns):")
-        st.dataframe(
+        st.write(
             corr_matrix.style.background_gradient(cmap="RdBu_r", vmin=-1, vmax=1)
         )
 
