@@ -311,40 +311,64 @@ else:
     st.info("No futures curve data available with current tickers. Adjust contract tickers in the code if needed.")
 
 # ---------------------------------------------------------
-# CORRELATION MATRIX
+# CORRELATION MATRIX (Robust Version)
 # ---------------------------------------------------------
 st.subheader("🔗 Correlation Matrix (Daily Returns)")
 
 corr_tickers = {label: corr_assets_map[label] for label in corr_selected_labels}
 
 corr_closes = {}
+
 for label, ticker in corr_tickers.items():
     try:
         df_corr = get_history(ticker, start_date, end_date)
-        if not df_corr.empty:
-            corr_closes[label] = df_corr["Close"]
-    except Exception:
-        continue
 
-if len(corr_closes) >= 2:
-    corr_df = pd.DataFrame(corr_closes).dropna()
-    returns = corr_df.pct_change().dropna()
-    corr_matrix = returns.corr()
+        # Validate data
+        if df_corr is None or df_corr.empty:
+            st.warning(f"No data for {label} ({ticker}). Skipping.")
+            continue
 
-    st.write("Correlation matrix (based on daily returns):")
-    st.dataframe(corr_matrix.style.background_gradient(cmap="RdBu_r", vmin=-1, vmax=1))
+        if "Close" not in df_corr.columns:
+            st.warning(f"{label} ({ticker}) has no 'Close' column. Skipping.")
+            continue
 
-    fig_corr = px.imshow(
-        corr_matrix,
-        text_auto=True,
-        color_continuous_scale="RdBu_r",
-        zmin=-1,
-        zmax=1,
-        title="Correlation Heatmap"
-    )
-    st.plotly_chart(fig_corr, use_container_width=True)
+        corr_closes[label] = df_corr["Close"]
+
+    except Exception as e:
+        st.warning(f"Error loading {label} ({ticker}): {e}")
+
+# Need at least 2 valid assets
+if len(corr_closes) < 2:
+    st.info("Not enough valid assets to compute a correlation matrix.")
 else:
-    st.info("Select at least two valid assets for the correlation matrix.")
+    # Combine into a single dataframe
+    corr_df = pd.DataFrame(corr_closes)
+
+    # Drop rows where all assets are NaN
+    corr_df = corr_df.dropna(how="all")
+
+    # Compute returns
+    returns = corr_df.pct_change().dropna(how="any")
+
+    if returns.empty:
+        st.info("No overlapping return data across selected assets.")
+    else:
+        corr_matrix = returns.corr()
+
+        st.write("Correlation matrix (daily returns):")
+        st.dataframe(
+            corr_matrix.style.background_gradient(cmap="RdBu_r", vmin=-1, vmax=1)
+        )
+
+        fig_corr = px.imshow(
+            corr_matrix,
+            text_auto=True,
+            color_continuous_scale="RdBu_r",
+            zmin=-1,
+            zmax=1,
+            title="Correlation Heatmap"
+        )
+        st.plotly_chart(fig_corr, use_container_width=True)
 
 # ---------------------------------------------------------
 # SIMPLE FORWARD PROJECTION
