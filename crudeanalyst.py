@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import yfinance as yf
-from datetime import date
+from datetime import date, timedelta
+import numpy as np
 
 # ---------------------------------------------------------
 # PAGE CONFIG
@@ -13,7 +14,7 @@ st.set_page_config(
 )
 
 st.title("🛢️ Crude Oil Analyst Dashboard")
-st.caption("Market monitoring and analytics using Yahoo Finance data only.")
+st.caption("Crude benchmarks, spreads, indicators, comparison, and exports using Yahoo Finance data only.")
 
 # ---------------------------------------------------------
 # SIDEBAR CONTROLS
@@ -26,13 +27,26 @@ benchmark_map = {
 }
 
 benchmark_label = st.sidebar.selectbox(
-    "Select Benchmark",
+    "Primary Benchmark",
     list(benchmark_map.keys())
 )
-
 benchmark = benchmark_map[benchmark_label]
 
-# Date pickers
+comparison_map = {
+    "None": None,
+    "Brent (BZ=F)": "BZ=F",
+    "WTI (CL=F)": "CL=F",
+    "US Dollar Index (DX-Y.NYB)": "DX-Y.NYB",
+    "S&P 500 (^GSPC)": "^GSPC",
+    "Euro Stoxx 50 (^STOXX50E)": "^STOXX50E"
+}
+
+comparison_label = st.sidebar.selectbox(
+    "Comparison Asset (normalized)",
+    list(comparison_map.keys())
+)
+comparison_ticker = comparison_map[comparison_label]
+
 start_date = st.sidebar.date_input(
     "Start Date",
     value=date(2023, 1, 1)
@@ -47,69 +61,217 @@ if start_date >= end_date:
     st.sidebar.error("Start date must be before end date.")
 
 # ---------------------------------------------------------
-# MARKET DATA SECTION
+# DATA FETCHING
 # ---------------------------------------------------------
-st.subheader("📈 Benchmark Price Overview")
+@st.cache_data(show_spinner=False)
+def get_history(ticker, start, end):
+    t = yf.Ticker(ticker)
+    return t.history(start=start, end=end, interval="1d")
 
-ticker = yf.Ticker(benchmark)
+data = None
+comp_data = None
+brent_data = None
+wti_data = None
 
 try:
-    hist = ticker.history(start=start_date, end=end_date, interval="1d")
-
-    if hist.empty:
-        st.error("No data returned for the selected date range.")
-    else:
-        fig = px.line(
-            hist,
-            x=hist.index,
-            y="Close",
-            title=f"{benchmark_label} Price Trend",
-            labels={"Close": "Price (USD)", "index": "Date"}
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Latest Price", f"${hist['Close'][-1]:.2f}")
-        col2.metric("Daily Change", f"{hist['Close'][-1] - hist['Close'][-2]:.2f}")
-        pct = (hist['Close'][-1] / hist['Close'][0] - 1) * 100
-        col3.metric("Return Over Period", f"{pct:.2f}%")
-
+    data = get_history(benchmark, start_date, end_date)
+    if comparison_ticker:
+        comp_data = get_history(comparison_ticker, start_date, end_date)
+    # For spread we always fetch both
+    brent_data = get_history("BZ=F", start_date, end_date)
+    wti_data = get_history("CL=F", start_date, end_date)
 except Exception as e:
-    st.error(f"Error fetching market data: {e}")
+    st.error(f"Error fetching data: {e}")
+
+if data is None or data.empty:
+    st.error("No data returned for the selected date range.")
+    st.stop()
 
 # ---------------------------------------------------------
-# SUPPLY & DEMAND INPUTS
+# TECHNICAL INDICATORS
 # ---------------------------------------------------------
-st.subheader("⚖️ Supply & Demand Indicators")
+def add_indicators(df):
+    df = df.copy()
+    close = df["Close"]
 
-colA, colB = st.columns(2)
+    # RSI (14)
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    roll_up = gain.rolling(14).mean()
+    roll_down = loss.rolling(14).mean()
+    rs = roll_up / roll_down
+    df["RSI_14"] = 100 - (100 / (1 + rs))
 
-with colA:
-    opec_output = st.number_input("OPEC Output (mbpd)", value=28.0)
-    us_production = st.number_input("US Production (mbpd)", value=13.2)
-    inventory_level = st.number_input("OECD Inventories (mb)", value=2700)
+    # MACD (12,26,9)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df["MACD"] = ema12 - ema26
+    df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-with colB:
-    refinery_runs = st.number_input("Global Refinery Runs (mbpd)", value=82.0)
-    demand_growth = st.number_input("Demand Growth (mbpd)", value=1.5)
-    spare_capacity = st.number_input("OPEC Spare Capacity (mbpd)", value=3.5)
+    # Bollinger Bands (20, 2)
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    df["BB_mid"] = ma20
+    df["BB_upper"] = ma20 + 2 * std20
+    df["BB_lower"] = ma20 - 2 * std20
 
-st.success("Supply & demand inputs updated.")
+    # Rolling volatility (20-day, annualized)
+    df["Vol_20d_annualized"] = close.pct_change().rolling(20).std() * np.sqrt(252)
+
+    return df
+
+data = add_indicators(data)
 
 # ---------------------------------------------------------
-# CRACK SPREAD CALCULATOR
+# MAIN PRICE & VOLUME
 # ---------------------------------------------------------
-st.subheader("🧮 3-2-1 Crack Spread Calculator")
+st.subheader("📈 Price & Volume")
 
-colC, colD, colE = st.columns(3)
+fig_price = px.line(
+    data,
+    x=data.index,
+    y="Close",
+    title=f"{benchmark_label} Close Price",
+    labels={"Close": "Price (USD)", "index": "Date"}
+)
+st.plotly_chart(fig_price, use_container_width=True)
 
-with colC:
-    crude_price = st.number_input("Crude Price (USD/bbl)", value=80.0)
-with colD:
-    gasoline_price = st.number_input("Gasoline Price (USD/bbl)", value=95.0)
-with colE:
-    diesel_price = st.number_input("Diesel Price (USD/bbl)", value=100.0)
+fig_vol = px.bar(
+    data,
+    x=data.index,
+    y="Volume",
+    title=f"{benchmark_label} Volume",
+    labels={"Volume": "Volume", "index": "Date"}
+)
+st.plotly_chart(fig_vol, use_container_width=True)
 
-crack_spread = (0.5 * gasoline_price + 0.5 * diesel_price) - crude_price
+col1, col2, col3 = st.columns(3)
+col1.metric("Latest Close", f"${data['Close'][-1]:.2f}")
+col2.metric("Daily Change", f"{data['Close'][-1] - data['Close'][-2]:.2f}")
+pct = (data['Close'][-1] / data['Close'][0] - 1) * 100
+col3.metric("Return Over Period", f"{pct:.2f}%")
 
-st.metric("3-2-1 Crack Spread", f"${crack_spread:.2f}")
+# ---------------------------------------------------------
+# TECHNICAL INDICATORS VIEW
+# ---------------------------------------------------------
+st.subheader("📊 Technical Indicators")
+
+tab_price, tab_rsi, tab_macd, tab_bb, tab_vol = st.tabs(
+    ["Price", "RSI", "MACD", "Bollinger Bands", "Volatility"]
+)
+
+with tab_price:
+    st.line_chart(data["Close"])
+
+with tab_rsi:
+    st.line_chart(data["RSI_14"])
+
+with tab_macd:
+    st.line_chart(data[["MACD", "MACD_signal"]])
+
+with tab_bb:
+    bb_df = data[["Close", "BB_upper", "BB_mid", "BB_lower"]].dropna()
+    fig_bb = px.line(bb_df, x=bb_df.index, y=["Close", "BB_upper", "BB_mid", "BB_lower"],
+                     labels={"value": "Price (USD)", "index": "Date", "variable": "Series"},
+                     title="Bollinger Bands")
+    st.plotly_chart(fig_bb, use_container_width=True)
+
+with tab_vol:
+    st.line_chart(data["Vol_20d_annualized"])
+
+# ---------------------------------------------------------
+# BRENT–WTI SPREAD
+# ---------------------------------------------------------
+st.subheader("🔀 Brent–WTI Spread")
+
+if not brent_data.empty and not wti_data.empty:
+    spread_df = pd.DataFrame({
+        "Brent": brent_data["Close"],
+        "WTI": wti_data["Close"]
+    }).dropna()
+    spread_df["Brent_WTI_Spread"] = spread_df["Brent"] - spread_df["WTI"]
+
+    fig_spread = px.line(
+        spread_df,
+        x=spread_df.index,
+        y="Brent_WTI_Spread",
+        title="Brent–WTI Spread (USD/bbl)",
+        labels={"Brent_WTI_Spread": "Spread (USD/bbl)", "index": "Date"}
+    )
+    st.plotly_chart(fig_spread, use_container_width=True)
+
+    st.metric("Latest Brent–WTI Spread", f"{spread_df['Brent_WTI_Spread'][-1]:.2f} USD/bbl")
+else:
+    st.info("Insufficient data to compute Brent–WTI spread for the selected dates.")
+
+# ---------------------------------------------------------
+# MULTI-ASSET COMPARISON (NORMALIZED)
+# ---------------------------------------------------------
+st.subheader("📐 Normalized Performance Comparison")
+
+if comparison_ticker and comp_data is not None and not comp_data.empty:
+    comp_df = pd.DataFrame({
+        benchmark_label: data["Close"],
+        comparison_label: comp_data["Close"]
+    }).dropna()
+
+    norm_df = comp_df / comp_df.iloc[0] * 100
+
+    fig_comp = px.line(
+        norm_df,
+        x=norm_df.index,
+        y=norm_df.columns,
+        title="Normalized Performance (Start = 100)",
+        labels={"value": "Index (Start=100)", "index": "Date", "variable": "Asset"}
+    )
+    st.plotly_chart(fig_comp, use_container_width=True)
+else:
+    st.info("Select a comparison asset in the sidebar to see normalized performance.")
+
+# ---------------------------------------------------------
+# SIMPLE FORECAST (NAIVE EXTENSION)
+# ---------------------------------------------------------
+st.subheader("🔮 Simple Forward Projection")
+
+horizon_days = st.slider("Forecast horizon (days)", 5, 60, 30)
+
+last_date = data.index[-1]
+last_price = data["Close"][-1]
+recent_ret = data["Close"].pct_change().dropna().tail(60)
+avg_daily_ret = recent_ret.mean()
+
+future_dates = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
+future_prices = [last_price * ((1 + avg_daily_ret) ** i) for i in range(1, horizon_days + 1)]
+
+future_df = pd.DataFrame({"Close": future_prices}, index=future_dates)
+
+proj_df = pd.concat([data[["Close"]].tail(60), future_df])
+
+fig_forecast = px.line(
+    proj_df,
+    x=proj_df.index,
+    y="Close",
+    title=f"{benchmark_label} – Historical & Simple Projection",
+    labels={"Close": "Price (USD)", "index": "Date"}
+)
+st.plotly_chart(fig_forecast, use_container_width=True)
+
+st.caption("Projection uses average daily return over the last 60 trading days (naive, not a full econometric model).")
+
+# ---------------------------------------------------------
+# EXPORT DATA
+# ---------------------------------------------------------
+st.subheader("📤 Export Data")
+
+export_df = data.copy()
+export_df.index.name = "Date"
+
+csv = export_df.to_csv().encode("utf-8")
+
+st.download_button(
+    label="Download benchmark data with indicators (CSV)",
+    data=csv,
+    file_name=f"{benchmark.replace('=','')}_with_indicators.csv",
+    mime="text/csv"
+)
