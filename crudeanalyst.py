@@ -14,12 +14,12 @@ st.set_page_config(
 )
 
 st.title("🛢️ Crude Oil Analyst Dashboard")
-st.caption("Curves, spreads, indicators, volatility, correlations, forecasts, and scenarios using Yahoo Finance only.")
+st.caption("Price, technicals, spreads, curves, correlations, volatility, and simulations using Yahoo Finance only.")
 
 # ---------------------------------------------------------
 # SIDEBAR CONTROLS
 # ---------------------------------------------------------
-st.sidebar.header("Controls")
+st.sidebar.header("Global Controls")
 
 benchmark_map = {
     "WTI (CL=F)": "CL=F",
@@ -28,41 +28,17 @@ benchmark_map = {
 benchmark_label = st.sidebar.selectbox("Primary benchmark", list(benchmark_map.keys()))
 benchmark = benchmark_map[benchmark_label]
 
-comparison_map = {
-    "None": None,
-    "Brent (BZ=F)": "BZ=F",
-    "WTI (CL=F)": "CL=F",
-    "US Dollar Index (DX-Y.NYB)": "DX-Y.NYB",
-    "S&P 500 (^GSPC)": "^GSPC",
-    "Euro Stoxx 50 (^STOXX50E)": "^STOXX50E",
-    "Gold (GC=F)": "GC=F",
-    "NatGas (NG=F)": "NG=F"
-}
-comparison_label = st.sidebar.selectbox("Comparison asset (normalized)", list(comparison_map.keys()))
-comparison_ticker = comparison_map[comparison_label]
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Correlation matrix assets")
-corr_assets_map = {
-    "WTI (CL=F)": "CL=F",
-    "Brent (BZ=F)": "BZ=F",
-    "US Dollar Index (DX-Y.NYB)": "DX-Y.NYB",
-    "S&P 500 (^GSPC)": "^GSPC",
-    "Euro Stoxx 50 (^STOXX50E)": "^STOXX50E",
-    "Gold (GC=F)": "GC=F",
-    "NatGas (NG=F)": "NG=F"
-}
-corr_default = ["WTI (CL=F)", "Brent (BZ=F)", "US Dollar Index (DX-Y.NYB)", "S&P 500 (^GSPC)"]
-corr_selected_labels = st.sidebar.multiselect(
-    "Select assets for correlation",
-    list(corr_assets_map.keys()),
-    default=corr_default
-)
-
 start_date = st.sidebar.date_input("Start date", value=date(2023, 1, 1))
 end_date = st.sidebar.date_input("End date", value=date.today())
 if start_date >= end_date:
     st.sidebar.error("Start date must be before end date.")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Feature Toggles")
+show_spreads = st.sidebar.checkbox("Show Spread Analysis", True)
+show_curve = st.sidebar.checkbox("Show Futures Curve Analysis", True)
+show_corr_vol = st.sidebar.checkbox("Show Correlation & Volatility", True)
+show_forecasting = st.sidebar.checkbox("Show Forecasts & Simulations", True)
 
 # ---------------------------------------------------------
 # DATA FETCHING
@@ -76,9 +52,8 @@ def get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
 
 try:
     data = get_history(benchmark, start_date, end_date)
-    comp_data = get_history(comparison_ticker, start_date, end_date) if comparison_ticker else None
-    brent_data = get_history("BZ=F", start_date, end_date)
     wti_data = get_history("CL=F", start_date, end_date)
+    brent_data = get_history("BZ=F", start_date, end_date)
 except Exception as e:
     st.error(f"Error fetching data: {e}")
     st.stop()
@@ -87,9 +62,49 @@ if data is None or data.empty:
     st.error("No data returned for the selected date range.")
     st.stop()
 
+returns = data["Close"].pct_change().dropna()
+
 # ---------------------------------------------------------
-# TECHNICAL INDICATORS
+# SECTION 1: PRICE & VOLUME
 # ---------------------------------------------------------
+st.header("Section 1 – Price & Volume")
+
+col_p1, col_p2 = st.columns([2, 1])
+
+with col_p1:
+    fig_price = px.line(
+        data,
+        x=data.index,
+        y="Close",
+        title=f"{benchmark_label} close price",
+        labels={"Close": "Price (USD)", "index": "Date"}
+    )
+    st.plotly_chart(fig_price, use_container_width=True)
+
+with col_p2:
+    if "Volume" in data.columns and not data["Volume"].isna().all():
+        fig_vol = px.bar(
+            data,
+            x=data.index,
+            y="Volume",
+            title=f"{benchmark_label} volume",
+            labels={"Volume": "Volume", "index": "Date"}
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
+    else:
+        st.info("No volume data available for this benchmark.")
+
+col_m1, col_m2, col_m3 = st.columns(3)
+col_m1.metric("Latest close", f"${data['Close'].iloc[-1]:.2f}")
+col_m2.metric("Daily change", f"{data['Close'].iloc[-1] - data['Close'].iloc[-2]:.2f}")
+pct_period = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
+col_m3.metric("Return over period", f"{pct_period:.2f}%")
+
+# ---------------------------------------------------------
+# SECTION 2: TECHNICAL INDICATORS
+# ---------------------------------------------------------
+st.header("Section 2 – Technical Indicators")
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     close = df["Close"]
@@ -123,43 +138,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 data = add_indicators(data)
 
-# Daily returns
-returns = data["Close"].pct_change().dropna()
-
-# ---------------------------------------------------------
-# PRICE & VOLUME
-# ---------------------------------------------------------
-st.subheader("📈 Price & Volume")
-
-fig_price = px.line(
-    data,
-    x=data.index,
-    y="Close",
-    title=f"{benchmark_label} close price",
-    labels={"Close": "Price (USD)", "index": "Date"}
-)
-st.plotly_chart(fig_price, use_container_width=True)
-
-fig_vol = px.bar(
-    data,
-    x=data.index,
-    y="Volume",
-    title=f"{benchmark_label} volume",
-    labels={"Volume": "Volume", "index": "Date"}
-)
-st.plotly_chart(fig_vol, use_container_width=True)
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Latest close", f"${data['Close'][-1]:.2f}")
-col2.metric("Daily change", f"{data['Close'][-1] - data['Close'][-2]:.2f}")
-pct = (data['Close'][-1] / data['Close'][0] - 1) * 100
-col3.metric("Return over period", f"{pct:.2f}%")
-
-# ---------------------------------------------------------
-# TECHNICAL INDICATORS VIEW
-# ---------------------------------------------------------
-st.subheader("📊 Technical indicators")
-
 tab_price, tab_rsi, tab_macd, tab_bb, tab_vol = st.tabs(
     ["Price", "RSI", "MACD", "Bollinger Bands", "Volatility"]
 )
@@ -188,634 +166,284 @@ with tab_vol:
     st.line_chart(data["Vol_20d_annualized"])
 
 # ---------------------------------------------------------
-# BRENT–WTI SPREAD
+# SECTION 3: SPREAD ANALYSIS
 # ---------------------------------------------------------
-st.subheader("🔀 Brent–WTI spread")
+st.header("Section 3 – Spread Analysis")
 
-if not brent_data.empty and not wti_data.empty:
-    spread_df = pd.DataFrame({
-        "Brent": brent_data["Close"],
-        "WTI": wti_data["Close"]
-    }).dropna()
-    spread_df["Brent_WTI_Spread"] = spread_df["Brent"] - spread_df["WTI"]
+if show_spreads:
+    st.subheader("Brent–WTI Spread")
 
-    fig_spread = px.line(
-        spread_df,
-        x=spread_df.index,
-        y="Brent_WTI_Spread",
-        title="Brent–WTI spread (USD/bbl)",
-        labels={"Brent_WTI_Spread": "Spread (USD/bbl)", "index": "Date"}
-    )
-    st.plotly_chart(fig_spread, use_container_width=True)
+    if not brent_data.empty and not wti_data.empty:
+        spread_df = pd.DataFrame({
+            "Brent": brent_data["Close"],
+            "WTI": wti_data["Close"]
+        }).dropna()
+        spread_df["Brent_WTI_Spread"] = spread_df["Brent"] - spread_df["WTI"]
 
-    st.metric("Latest Brent–WTI spread", f"{spread_df['Brent_WTI_Spread'][-1]:.2f} USD/bbl")
-else:
-    st.info("Insufficient data to compute Brent–WTI spread for the selected dates.")
-
-# ---------------------------------------------------------
-# NORMALIZED PERFORMANCE COMPARISON
-# ---------------------------------------------------------
-st.subheader("📐 Normalized performance comparison")
-
-if comparison_ticker and comp_data is not None and not comp_data.empty:
-    comp_df = pd.DataFrame({
-        benchmark_label: data["Close"],
-        comparison_label: comp_data["Close"]
-    }).dropna()
-
-    norm_df = comp_df / comp_df.iloc[0] * 100
-
-    fig_comp = px.line(
-        norm_df,
-        x=norm_df.index,
-        y=norm_df.columns,
-        title="Normalized performance (start = 100)",
-        labels={"value": "Index (start=100)", "index": "Date", "variable": "Asset"}
-    )
-    st.plotly_chart(fig_comp, use_container_width=True)
-else:
-    st.info("Select a comparison asset in the sidebar to see normalized performance.")
-
-# ---------------------------------------------------------
-# FUTURES CURVE (MULTI-CONTRACT)
-# ---------------------------------------------------------
-st.subheader("🧵 Futures curve (multi-contract)")
-
-curve_underlying = st.selectbox("Curve underlying", ["WTI", "Brent"])
-
-# NOTE: These tickers are examples; adjust to the exact contracts you care about.
-if curve_underlying == "WTI":
-    futures_contracts = {
-        "Front": "CL=F",          # front month
-        "Jun 2025": "CLM25.NYM",
-        "Dec 2025": "CLZ25.NYM",
-        "Jun 2026": "CLM26.NYM",
-        "Dec 2026": "CLZ26.NYM"
-    }
-else:
-    futures_contracts = {
-        "Front": "BZ=F",          # front month
-        "Jun 2025": "BZM25.NYM",
-        "Dec 2025": "BZZ25.NYM",
-        "Jun 2026": "BZM26.NYM",
-        "Dec 2026": "BZZ26.NYM"
-    }
-
-curve_prices = {}
-for label, ticker in futures_contracts.items():
-    try:
-        df_curve = get_history(ticker, date.today() - timedelta(days=10), date.today())
-        if df_curve is not None and not df_curve.empty:
-            curve_prices[label] = df_curve["Close"][-1]
-    except Exception:
-        continue
-
-if curve_prices:
-    curve_df = pd.DataFrame(
-        {"Contract": list(curve_prices.keys()), "Price": list(curve_prices.values())}
-    )
-    fig_curve = px.line(
-        curve_df,
-        x="Contract",
-        y="Price",
-        markers=True,
-        title=f"{curve_underlying} futures curve",
-        labels={"Price": "Price (USD/bbl)", "Contract": "Contract"}
-    )
-    st.plotly_chart(fig_curve, use_container_width=True)
-else:
-    st.info("No futures curve data available with current tickers. Adjust contract tickers in the code if needed.")
-
-# ---------------------------------------------------------
-# CORRELATION MATRIX (DAILY RETURNS)
-# ---------------------------------------------------------
-st.subheader("🔗 Correlation matrix (daily returns)")
-
-corr_tickers = {label: corr_assets_map[label] for label in corr_selected_labels}
-corr_closes = {}
-
-for label, ticker in corr_tickers.items():
-    try:
-        df_corr = get_history(ticker, start_date, end_date)
-        if df_corr is None or df_corr.empty:
-            st.warning(f"No data for {label} ({ticker}). Skipping.")
-            continue
-        if "Close" not in df_corr.columns:
-            st.warning(f"{label} ({ticker}) has no 'Close' column. Skipping.")
-            continue
-        corr_closes[label] = df_corr["Close"]
-    except Exception as e:
-        st.warning(f"Error loading {label} ({ticker}): {e}")
-
-if len(corr_closes) < 2:
-    st.info("Not enough valid assets to compute a correlation matrix.")
-else:
-    corr_df = pd.DataFrame(corr_closes).dropna(how="any")
-    if corr_df.shape[0] < 2:
-        st.info("No overlapping data across selected assets.")
-    else:
-        corr_returns = corr_df.pct_change().dropna(how="any")
-        if corr_returns.empty:
-            st.info("No overlapping return data across selected assets.")
-        else:
-            corr_matrix = corr_returns.corr()
-            st.write("Correlation matrix (daily returns):")
-            st.dataframe(corr_matrix)
-
-            fig_corr = px.imshow(
-                corr_matrix,
-                text_auto=True,
-                color_continuous_scale="RdBu_r",
-                zmin=-1,
-                zmax=1,
-                title="Correlation heatmap"
-            )
-            st.plotly_chart(fig_corr, use_container_width=True)
-
-# ---------------------------------------------------------
-# VOLATILITY ANALYTICS
-# ---------------------------------------------------------
-st.subheader("🌪 Volatility analytics")
-
-# GARCH-style EWMA volatility
-def ewma_vol(returns: pd.Series, lam: float = 0.94) -> pd.Series:
-    var_list = []
-    prev_var = returns.var()
-    for r in returns:
-        v = lam * prev_var + (1 - lam) * (r ** 2)
-        var_list.append(v)
-        prev_var = v
-    ewma = np.sqrt(np.array(var_list)) * np.sqrt(252)
-    return pd.Series(ewma, index=returns.index)
-
-ewma_series = ewma_vol(returns)
-data["EWMA_vol_annualized"] = ewma_series.reindex(data.index)
-
-# Realized volatility cones
-horizons = [10, 20, 60, 120]
-cone_df = pd.DataFrame(index=data.index)
-
-for h in horizons:
-    cone_df[f"Vol_{h}d"] = data["Close"].pct_change().rolling(h).std() * np.sqrt(252)
-
-fig_cone = px.line(
-    cone_df,
-    x=cone_df.index,
-    y=[c for c in cone_df.columns],
-    title="Realized volatility cones (annualized)",
-    labels={"value": "Volatility", "index": "Date", "variable": "Horizon"}
-)
-st.plotly_chart(fig_cone, use_container_width=True)
-
-# Volatility regime detection (based on 20d vol)
-vol_series = data["Vol_20d_annualized"].dropna()
-if not vol_series.empty:
-    low_thr = vol_series.quantile(0.33)
-    high_thr = vol_series.quantile(0.66)
-
-    def classify_regime(v):
-        if v <= low_thr:
-            return "Low"
-        elif v >= high_thr:
-            return "High"
-        else:
-            return "Medium"
-
-    regime = vol_series.apply(classify_regime)
-    regime_counts = regime.value_counts()
-
-    st.write("Volatility regimes (based on 20d realized vol):")
-    st.bar_chart(regime_counts)
-
-    current_vol = vol_series.iloc[-1]
-    current_regime = classify_regime(current_vol)
-    st.metric("Current volatility regime", current_regime, f"{current_vol:.2%}")
-else:
-    st.info("Not enough data to classify volatility regimes.")
-
-# ---------------------------------------------------------
-# FORECASTING: EXP SMOOTHING, ROLLING AR, MONTE CARLO
-# ---------------------------------------------------------
-st.subheader("🔮 Forecasting & simulations")
-
-horizon_days = st.slider("Forecast horizon (days)", 5, 60, 30)
-
-last_date = data.index[-1]
-last_price = data["Close"][-1]
-
-# Exponential smoothing forecast (on price)
-alpha = st.slider("Exponential smoothing alpha", 0.01, 0.5, 0.2)
-level = data["Close"].iloc[0]
-for p in data["Close"]:
-    level = alpha * p + (1 - alpha) * level
-exp_forecast_prices = [level for _ in range(horizon_days)]
-exp_dates = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
-exp_df = pd.DataFrame({"ExpSmooth": exp_forecast_prices}, index=exp_dates)
-
-# Rolling AR(1) forecast on returns
-window_ar = 60
-if len(returns) > window_ar + 1:
-    r_window = returns.tail(window_ar)
-    r_lag = r_window.shift(1).dropna()
-    r_curr = r_window.iloc[1:]
-    phi = (r_lag * r_curr).sum() / (r_lag ** 2).sum()
-    last_r = returns.iloc[-1]
-    ar_returns = [phi ** i * last_r for i in range(1, horizon_days + 1)]
-    ar_prices = []
-    p = last_price
-    for r in ar_returns:
-        p = p * (1 + r)
-        ar_prices.append(p)
-    ar_df = pd.DataFrame({"AR1": ar_prices}, index=exp_dates)
-else:
-    ar_df = pd.DataFrame(index=exp_dates)
-
-# Monte Carlo simulation
-mc_paths = st.slider("Monte Carlo paths", 50, 500, 200)
-mu = returns.mean()
-sigma = returns.std()
-dt = 1.0
-
-mc_matrix = np.zeros((horizon_days, mc_paths))
-for j in range(mc_paths):
-    prices = [last_price]
-    for i in range(1, horizon_days):
-        shock = np.random.normal(mu * dt, sigma * np.sqrt(dt))
-        prices.append(prices[-1] * (1 + shock))
-    mc_matrix[:, j] = prices
-
-mc_index = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
-mc_df = pd.DataFrame(mc_matrix, index=mc_index)
-mc_median = mc_df.median(axis=1)
-mc_p10 = mc_df.quantile(0.1, axis=1)
-mc_p90 = mc_df.quantile(0.9, axis=1)
-
-# Build the combined forecast dataframe
-forecast_df = pd.DataFrame({"Historical": data["Close"].tail(60)})
-
-future_block = pd.DataFrame(
-    {
-        "ExpSmooth": exp_df["ExpSmooth"],
-        "AR1": ar_df["AR1"] if "AR1" in ar_df.columns else np.nan,
-        "MC_median": mc_median,
-        "MC_p10": mc_p10,
-        "MC_p90": mc_p90,
-    }
-)
-
-forecast_df = pd.concat([forecast_df, future_block], axis=0)
-
-
-fig_forecast = px.line(
-    forecast_df,
-    x=forecast_df.index,
-    y=["Historical", "ExpSmooth", "AR1", "MC_median", "MC_p10", "MC_p90"],
-    title=f"{benchmark_label} – forecasts & Monte Carlo bands",
-    labels={"value": "Price (USD)", "index": "Date", "variable": "Series"}
-)
-st.plotly_chart(fig_forecast, use_container_width=True)
-
-st.caption("ExpSmooth = exponential smoothing level; AR1 = rolling AR(1) on returns; MC bands = 10th/90th percentiles of simulated paths.")
-
-# ---------------------------------------------------------
-# SCENARIO ANALYSIS
-# ---------------------------------------------------------
-st.subheader("🧮 Scenario analysis")
-
-st.write("Simple what-if on crude vs USD and OPEC supply (illustrative elasticities).")
-
-usd_change = st.slider("USD index change (%)", -10.0, 10.0, 0.0, step=0.5)
-opec_change = st.slider("OPEC supply change (mbpd)", -3.0, 3.0, 0.0, step=0.1)
-
-# Very rough illustrative elasticities (you can tune these):
-beta_usd = -0.3   # crude % change per 1% USD move
-beta_opec = -0.02 # crude % change per 1 mbpd OPEC change
-
-price_impact_pct = beta_usd * usd_change + beta_opec * opec_change
-scenario_price = last_price * (1 + price_impact_pct / 100.0)
-
-col_s1, col_s2, col_s3 = st.columns(3)
-col_s1.metric("Current price", f"${last_price:.2f}")
-col_s2.metric("Scenario price", f"${scenario_price:.2f}")
-col_s3.metric("Price impact", f"{price_impact_pct:.2f}%")
-
-st.caption("Elasticities are placeholders; adjust beta_usd and beta_opec in code to match your own views or regressions.")
-
-# ---------------------------------------------------------
-# EXPORT DATA
-# ---------------------------------------------------------
-st.subheader("📤 Export data")
-
-export_df = data.copy()
-export_df.index.name = "Date"
-csv = export_df.to_csv().encode("utf-8")
-
-st.download_button(
-    label="Download benchmark data with indicators (CSV)",
-    data=csv,
-    file_name=f"{benchmark.replace('=','')}_with_indicators.csv",
-    mime="text/csv"
-)
-
-# ---------------------------------------------------------
-# FUTURES CURVE (MULTI-CONTRACT + ANALYTICS)
-# ---------------------------------------------------------
-st.subheader("🧵 Futures curve & term structure analytics")
-
-curve_underlying = st.selectbox("Curve underlying", ["WTI", "Brent"])
-
-if curve_underlying == "WTI":
-    futures_contracts = {
-        "CL1": "CL=F",          # front month
-        "CL2": "CLM25.NYM",
-        "CL3": "CLZ25.NYM",
-        "CL4": "CLM26.NYM",
-        "CL5": "CLZ26.NYM"
-    }
-else:
-    futures_contracts = {
-        "BZ1": "BZ=F",          # front month
-        "BZ2": "BZM25.NYM",
-        "BZ3": "BZZ25.NYM",
-        "BZ4": "BZM26.NYM",
-        "BZ5": "BZZ26.NYM"
-    }
-
-curve_prices = {}
-for label, ticker in futures_contracts.items():
-    try:
-        df_curve = get_history(ticker, date.today() - timedelta(days=10), date.today())
-        if df_curve is not None and not df_curve.empty:
-            curve_prices[label] = df_curve["Close"][-1]
-    except Exception:
-        continue
-
-if curve_prices:
-    curve_df = pd.DataFrame(
-        {"Contract": list(curve_prices.keys()), "Price": list(curve_prices.values())}
-    )
-
-    # Basic curve plot
-    fig_curve = px.line(
-        curve_df,
-        x="Contract",
-        y="Price",
-        markers=True,
-        title=f"{curve_underlying} futures curve",
-        labels={"Price": "Price (USD/bbl)", "Contract": "Contract"}
-    )
-    st.plotly_chart(fig_curve, use_container_width=True)
-
-    # Carry (roll yield) between adjacent contracts
-    curve_df["Carry_%"] = curve_df["Price"].pct_change() * 100
-    st.write("Adjacent contract carry (roll yield, %):")
-    st.dataframe(curve_df[["Contract", "Carry_%"]])
-
-    # Curve shape: contango vs backwardation (front vs last)
-    front = curve_df["Price"].iloc[0]
-    back = curve_df["Price"].iloc[-1]
-    shape = "Contango" if back > front else "Backwardation"
-    st.metric("Curve shape", shape, f"{(back/front - 1)*100:.2f}% front→back")
-
-    # Simple calendar spreads (front vs next)
-    if len(curve_df) >= 2:
-        cal_spread = curve_df["Price"].iloc[0] - curve_df["Price"].iloc[1]
-        st.metric("Front–second calendar spread", f"{cal_spread:.2f} USD/bbl")
-
-    # Simple butterfly: CL1 - 2*CL3 + CL5 (or equivalent)
-    if len(curve_df) >= 5:
-        bf = (
-            curve_df["Price"].iloc[0]
-            - 2 * curve_df["Price"].iloc[2]
-            + curve_df["Price"].iloc[4]
+        fig_spread = px.line(
+            spread_df,
+            x=spread_df.index,
+            y="Brent_WTI_Spread",
+            title="Brent–WTI spread (USD/bbl)",
+            labels={"Brent_WTI_Spread": "Spread (USD/bbl)", "index": "Date"}
         )
-        st.metric("Simple butterfly (1–3–5)", f"{bf:.2f} USD/bbl")
-else:
-    st.info("No futures curve data available with current tickers. Adjust contract tickers in the code if needed.")
+        st.plotly_chart(fig_spread, use_container_width=True)
 
-# ---------------------------------------------------------
-# CRACK SPREAD SUITE
-# ---------------------------------------------------------
-st.subheader("🛠 Crack spreads (RBOB & Heating Oil)")
-
-rb = get_history("RB=F", start_date, end_date)   # RBOB gasoline
-ho = get_history("HO=F", start_date, end_date)   # Heating oil
-
-if not rb.empty and not ho.empty and not wti_data.empty:
-    crack_df = pd.DataFrame({
-        "WTI": wti_data["Close"],
-        "RBOB": rb["Close"],
-        "HO": ho["Close"]
-    }).dropna()
-
-    # 3-2-1 crack: (2*RBOB + 1*HO)/3 - WTI
-    crack_df["321_crack"] = ((2 * crack_df["RBOB"] + crack_df["HO"]) / 3) - crack_df["WTI"]
-
-    # 5-3-2 crack: (3*RBOB + 2*HO)/5 - WTI
-    crack_df["532_crack"] = ((3 * crack_df["RBOB"] + 2 * crack_df["HO"]) / 5) - crack_df["WTI"]
-
-    # Gasoline crack: RBOB - WTI
-    crack_df["gasoline_crack"] = crack_df["RBOB"] - crack_df["WTI"]
-
-    # Diesel crack: HO - WTI
-    crack_df["diesel_crack"] = crack_df["HO"] - crack_df["WTI"]
-
-    fig_crack = px.line(
-        crack_df,
-        x=crack_df.index,
-        y=["321_crack", "532_crack", "gasoline_crack", "diesel_crack"],
-        title="Crack spreads (USD/bbl)",
-        labels={"value": "Spread (USD/bbl)", "index": "Date", "variable": "Crack"}
-    )
-    st.plotly_chart(fig_crack, use_container_width=True)
-
-    st.metric("Latest 3-2-1 crack", f"{crack_df['321_crack'].iloc[-1]:.2f} USD/bbl")
-else:
-    st.info("Insufficient data to compute crack spreads for the selected dates.")
-
-# ---------------------------------------------------------
-# REGIME-SWITCHING (TREND VS MEAN-REVERSION)
-# ---------------------------------------------------------
-st.subheader("🧬 Trend vs mean-reversion regimes")
-
-ret_20 = data["Close"].pct_change().rolling(20).mean()
-vol_20 = data["Close"].pct_change().rolling(20).std()
-
-regime_df = pd.DataFrame({"ret_20": ret_20, "vol_20": vol_20}).dropna()
-
-def classify_trend(row):
-    if row["ret_20"] > 0 and row["vol_20"] < vol_20.median():
-        return "Trending up"
-    elif row["ret_20"] < 0 and row["vol_20"] < vol_20.median():
-        return "Trending down"
+        st.metric("Latest Brent–WTI spread", f"{spread_df['Brent_WTI_Spread'].iloc[-1]:.2f} USD/bbl")
     else:
-        return "Mean-reverting / choppy"
+        st.info("Insufficient data to compute Brent–WTI spread.")
 
-regime_df["Regime"] = regime_df.apply(classify_trend, axis=1)
-regime_counts = regime_df["Regime"].value_counts()
+    st.subheader("Crack Spreads (RBOB & Heating Oil)")
 
-st.bar_chart(regime_counts)
+    rb = get_history("RB=F", start_date, end_date)   # RBOB gasoline
+    ho = get_history("HO=F", start_date, end_date)   # Heating oil
 
-current_regime = regime_df["Regime"].iloc[-1]
-st.metric("Current price regime", current_regime)
+    if not rb.empty and not ho.empty and not wti_data.empty:
+        crack_df = pd.DataFrame({
+            "WTI": wti_data["Close"],
+            "RBOB": rb["Close"],
+            "HO": ho["Close"]
+        }).dropna()
 
-# ---------------------------------------------------------
-# PRICE ELASTICITY & FACTOR DECOMPOSITION
-# ---------------------------------------------------------
-st.subheader("📐 Price elasticity & factor decomposition")
+        crack_df["321_crack"] = ((2 * crack_df["RBOB"] + crack_df["HO"]) / 3) - crack_df["WTI"]
+        crack_df["532_crack"] = ((3 * crack_df["RBOB"] + 2 * crack_df["HO"]) / 5) - crack_df["WTI"]
+        crack_df["gasoline_crack"] = crack_df["RBOB"] - crack_df["WTI"]
+        crack_df["diesel_crack"] = crack_df["HO"] - crack_df["WTI"]
 
-# Fetch factors: USD index and S&P 500
-usd_df = get_history("DX-Y.NYB", start_date, end_date)
-spx_df = get_history("^GSPC", start_date, end_date)
+        fig_crack = px.line(
+            crack_df,
+            x=crack_df.index,
+            y=["321_crack", "532_crack", "gasoline_crack", "diesel_crack"],
+            title="Crack spreads (USD/bbl)",
+            labels={"value": "Spread (USD/bbl)", "index": "Date", "variable": "Crack"}
+        )
+        st.plotly_chart(fig_crack, use_container_width=True)
 
-if not usd_df.empty and not spx_df.empty:
-    fac_df = pd.DataFrame({
-        "Crude": data["Close"],
-        "USD": usd_df["Close"],
-        "SPX": spx_df["Close"]
-    }).dropna()
-
-    fac_ret = fac_df.pct_change().dropna()
-
-    # Simple betas via OLS (no external libs)
-    X = np.column_stack([fac_ret["USD"], fac_ret["SPX"], np.ones(len(fac_ret))])
-    y = fac_ret["Crude"].values
-
-    # Solve (X'X)b = X'y
-    beta = np.linalg.lstsq(X, y, rcond=None)[0]
-    beta_usd, beta_spx, alpha = beta
-
-    col_f1, col_f2, col_f3 = st.columns(3)
-    col_f1.metric("Beta to USD", f"{beta_usd:.3f}")
-    col_f2.metric("Beta to S&P 500", f"{beta_spx:.3f}")
-    col_f3.metric("Alpha (daily)", f"{alpha:.5f}")
-
-    st.caption("Betas estimated from daily returns via simple OLS (Crude ~ USD + SPX).")
-else:
-    st.info("Not enough data to estimate factor betas (USD/SPX).")
+        st.metric("Latest 3-2-1 crack", f"{crack_df['321_crack'].iloc[-1]:.2f} USD/bbl")
+    else:
+        st.info("Insufficient data to compute crack spreads.")
 
 # ---------------------------------------------------------
-# RISK METRICS: VaR, CVaR, DRAWDOWN
+# SECTION 4: FUTURES CURVE ANALYSIS
 # ---------------------------------------------------------
-st.subheader("⚠️ Risk metrics (VaR, CVaR, drawdown)")
+st.header("Section 4 – Futures Curve Analysis")
 
-if not returns.empty:
-    confidence = st.slider("VaR confidence level", 0.90, 0.99, 0.95, step=0.01)
+if show_curve:
+    st.subheader("Futures Curve (Multi-Contract + Analytics)")
 
-    # Historical VaR
-    var_level = np.quantile(returns, 1 - confidence)
-    var_pct = var_level * 100
+    curve_underlying = st.selectbox("Curve underlying", ["WTI", "Brent"])
 
-    # CVaR (Expected Shortfall)
-    tail_losses = returns[returns <= var_level]
-    cvar_level = tail_losses.mean() if len(tail_losses) > 0 else np.nan
-    cvar_pct = cvar_level * 100
+    if curve_underlying == "WTI":
+        futures_contracts = {
+            "CL1": "CL=F",
+            "CL2": "CLM25.NYM",
+            "CL3": "CLZ25.NYM",
+            "CL4": "CLM26.NYM",
+            "CL5": "CLZ26.NYM"
+        }
+    else:
+        futures_contracts = {
+            "BZ1": "BZ=F",
+            "BZ2": "BZM25.NYM",
+            "BZ3": "BZZ25.NYM",
+            "BZ4": "BZM26.NYM",
+            "BZ5": "BZZ26.NYM"
+        }
 
-    # Max drawdown
-    cum = (1 + returns).cumprod()
-    peak = cum.cummax()
-    drawdown = (cum - peak) / peak
-    max_dd = drawdown.min() * 100
+    curve_prices = {}
+    for label, ticker in futures_contracts.items():
+        df_curve = get_history(ticker, date.today() - timedelta(days=10), date.today())
+        if df_curve is not None and not df_curve.empty:
+            curve_prices[label] = df_curve["Close"].iloc[-1]
 
-    col_r1, col_r2, col_r3 = st.columns(3)
-    col_r1.metric(f"{int(confidence*100)}% 1-day VaR", f"{var_pct:.2f}%")
-    col_r2.metric(f"{int(confidence*100)}% 1-day CVaR", f"{cvar_pct:.2f}%")
-    col_r3.metric("Max drawdown (period)", f"{max_dd:.2f}%")
+    if curve_prices:
+        curve_df = pd.DataFrame(
+            {"Contract": list(curve_prices.keys()), "Price": list(curve_prices.values())}
+        )
 
-    fig_dd = px.line(
-        drawdown,
-        x=drawdown.index,
-        y=drawdown.values,
-        title="Drawdown over time",
-        labels={"x": "Date", "y": "Drawdown"}
-    )
-    st.plotly_chart(fig_dd, use_container_width=True)
-else:
-    st.info("Not enough return data to compute risk metrics.")
+        fig_curve = px.line(
+            curve_df,
+            x="Contract",
+            y="Price",
+            markers=True,
+            title=f"{curve_underlying} futures curve",
+            labels={"Price": "Price (USD/bbl)", "Contract": "Contract"}
+        )
+        st.plotly_chart(fig_curve, use_container_width=True)
+
+        curve_df["Carry_%"] = curve_df["Price"].pct_change() * 100
+        st.write("Adjacent contract carry (roll yield, %):")
+        st.dataframe(curve_df)
+
+        front = curve_df["Price"].iloc[0]
+        back = curve_df["Price"].iloc[-1]
+        shape = "Contango" if back > front else "Backwardation"
+        st.metric("Curve shape", shape, f"{(back/front - 1)*100:.2f}% front→back")
+
+        if len(curve_df) >= 2:
+            cal_spread = curve_df["Price"].iloc[0] - curve_df["Price"].iloc[1]
+            st.metric("Front–second calendar spread", f"{cal_spread:.2f} USD/bbl")
+
+        if len(curve_df) >= 5:
+            bf = (
+                curve_df["Price"].iloc[0]
+                - 2 * curve_df["Price"].iloc[2]
+                + curve_df["Price"].iloc[4]
+            )
+            st.metric("Simple butterfly (1–3–5)", f"{bf:.2f} USD/bbl")
+    else:
+        st.info("No futures curve data available with current tickers.")
 
 # ---------------------------------------------------------
-# FORECASTING & SIMULATIONS (EXP, AR1, MONTE CARLO)
+# SECTION 5: CORRELATION & VOLATILITY ANALYSIS
 # ---------------------------------------------------------
-st.subheader("🔮 Forecasting & simulations")
+st.header("Section 5 – Correlation & Volatility Analysis")
 
-horizon_days = st.slider("Forecast horizon (days)", 5, 60, 30)
+if show_corr_vol:
+    st.subheader("Correlation Matrix (Daily Returns)")
 
-last_date = data.index[-1]
-last_price = data["Close"][-1]
-
-# Exponential smoothing forecast (on price)
-alpha = st.slider("Exponential smoothing alpha", 0.01, 0.5, 0.2)
-level = data["Close"].iloc[0]
-for p in data["Close"]:
-    level = alpha * p + (1 - alpha) * level
-exp_forecast_prices = [level for _ in range(horizon_days)]
-exp_dates = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
-exp_df = pd.DataFrame({"ExpSmooth": exp_forecast_prices}, index=exp_dates)
-
-# Rolling AR(1) forecast on returns
-window_ar = 60
-if len(returns) > window_ar + 1:
-    r_window = returns.tail(window_ar)
-    r_lag = r_window.shift(1).dropna()
-    r_curr = r_window.iloc[1:]
-    phi = (r_lag * r_curr).sum() / (r_lag ** 2).sum()
-    last_r = returns.iloc[-1]
-    ar_returns = [phi ** i * last_r for i in range(1, horizon_days + 1)]
-    ar_prices = []
-    p = last_price
-    for r in ar_returns:
-        p = p * (1 + r)
-        ar_prices.append(p)
-    ar_df = pd.DataFrame({"AR1": ar_prices}, index=exp_dates)
-else:
-    ar_df = pd.DataFrame(index=exp_dates)
-
-# Monte Carlo simulation
-mc_paths = st.slider("Monte Carlo paths", 50, 500, 200)
-mu = returns.mean()
-sigma = returns.std()
-dt = 1.0
-
-mc_matrix = np.zeros((horizon_days, mc_paths))
-for j in range(mc_paths):
-    prices = [last_price]
-    for i in range(1, horizon_days):
-        shock = np.random.normal(mu * dt, sigma * np.sqrt(dt))
-        prices.append(prices[-1] * (1 + shock))
-    mc_matrix[:, j] = prices
-
-mc_index = exp_dates
-mc_df = pd.DataFrame(mc_matrix, index=mc_index)
-mc_median = mc_df.median(axis=1)
-mc_p10 = mc_df.quantile(0.1, axis=1)
-mc_p90 = mc_df.quantile(0.9, axis=1)
-
-# Combine historical + forecasts
-forecast_df = pd.DataFrame({"Historical": data["Close"].tail(60)})
-future_block = pd.DataFrame(
-    {
-        "ExpSmooth": exp_df["ExpSmooth"],
-        "AR1": ar_df["AR1"] if "AR1" in ar_df.columns else np.nan,
-        "MC_median": mc_median,
-        "MC_p10": mc_p10,
-        "MC_p90": mc_p90,
+    corr_assets = {
+        "WTI": "CL=F",
+        "Brent": "BZ=F",
+        "USD": "DX-Y.NYB",
+        "S&P 500": "^GSPC",
+        "Gold": "GC=F",
+        "NatGas": "NG=F"
     }
-)
-forecast_df = pd.concat([forecast_df, future_block], axis=0)
 
-fig_forecast = px.line(
-    forecast_df,
-    x=forecast_df.index,
-    y=["Historical", "ExpSmooth", "AR1", "MC_median", "MC_p10", "MC_p90"],
-    title=f"{benchmark_label} – forecasts & Monte Carlo bands",
-    labels={"value": "Price (USD)", "index": "Date", "variable": "Series"}
-)
-st.plotly_chart(fig_forecast, use_container_width=True)
+    corr_data = {}
+    for name, ticker in corr_assets.items():
+        df = get_history(ticker, start_date, end_date)
+        if not df.empty:
+            corr_data[name] = df["Close"]
 
-st.caption("ExpSmooth = exponential smoothing level; AR1 = rolling AR(1) on returns; MC bands = 10th/90th percentiles of simulated paths.")
+    corr_df = pd.DataFrame(corr_data).pct_change().dropna()
 
+    if not corr_df.empty:
+        corr_matrix = corr_df.corr()
+        st.dataframe(corr_matrix)
 
+        fig_corr = px.imshow(
+            corr_matrix,
+            text_auto=True,
+            color_continuous_scale="RdBu_r",
+            zmin=-1, zmax=1,
+            title="Correlation heatmap"
+        )
+        st.plotly_chart(fig_corr, use_container_width=True)
+    else:
+        st.info("Not enough overlapping data to compute correlations.")
 
+    st.subheader("Volatility & Regime Analysis")
 
+    vol_20 = data["Close"].pct_change().rolling(20).std() * np.sqrt(252)
+    vol_60 = data["Close"].pct_change().rolling(60).std() * np.sqrt(252)
 
+    vol_df = pd.DataFrame({"Vol_20d": vol_20, "Vol_60d": vol_60}).dropna()
+    fig_vol = px.line(
+        vol_df,
+        x=vol_df.index,
+        y=["Vol_20d", "Vol_60d"],
+        title="Realized volatility (annualized)",
+        labels={"value": "Volatility", "index": "Date", "variable": "Horizon"}
+    )
+    st.plotly_chart(fig_vol, use_container_width=True)
 
+    ret_20 = data["Close"].pct_change().rolling(20).mean()
+    regime_df = pd.DataFrame({"ret_20": ret_20, "vol_20": vol_20}).dropna()
+
+    if not regime_df.empty:
+        vol_median = regime_df["vol_20"].median()
+
+        def classify_regime(row):
+            if row["ret_20"] > 0 and row["vol_20"] < vol_median:
+                return "Trending up"
+            elif row["ret_20"] < 0 and row["vol_20"] < vol_median:
+                return "Trending down"
+            else:
+                return "Mean-reverting / choppy"
+
+        regime_df["Regime"] = regime_df.apply(classify_regime, axis=1)
+        st.bar_chart(regime_df["Regime"].value_counts())
+        st.metric("Current volatility regime", regime_df["Regime"].iloc[-1])
+
+# ---------------------------------------------------------
+# SECTION 6: FORECASTS & SIMULATIONS
+# ---------------------------------------------------------
+st.header("Section 6 – Forecasts & Simulations")
+
+if show_forecasting:
+    if returns.empty:
+        st.info("Not enough return data for forecasting.")
+    else:
+        horizon_days = st.slider("Forecast horizon (days)", 5, 60, 30)
+
+        last_date = data.index[-1]
+        last_price = data["Close"].iloc[-1]
+
+        # Exponential smoothing
+        alpha = st.slider("Exponential smoothing alpha", 0.01, 0.5, 0.2)
+        level = data["Close"].iloc[0]
+        for p in data["Close"]:
+            level = alpha * p + (1 - alpha) * level
+        exp_forecast = [level] * horizon_days
+
+        # AR(1) on returns
+        window_ar = 60
+        if len(returns) > window_ar + 1:
+            r_window = returns.tail(window_ar)
+            r_lag = r_window.shift(1).dropna()
+            r_curr = r_window.iloc[1:]
+            phi = (r_lag * r_curr).sum() / (r_lag ** 2).sum()
+            last_r = returns.iloc[-1]
+            ar_prices = []
+            p = last_price
+            for i in range(horizon_days):
+                p = p * (1 + phi * last_r)
+                ar_prices.append(p)
+        else:
+            ar_prices = [np.nan] * horizon_days
+
+        # Monte Carlo
+        mc_paths = st.slider("Monte Carlo paths", 50, 500, 200)
+        mu = returns.mean()
+        sigma = returns.std()
+
+        mc_matrix = np.zeros((horizon_days, mc_paths))
+        for j in range(mc_paths):
+            prices = [last_price]
+            for i in range(1, horizon_days):
+                shock = np.random.normal(mu, sigma)
+                prices.append(prices[-1] * (1 + shock))
+            mc_matrix[:, j] = prices
+
+        mc_df = pd.DataFrame(mc_matrix)
+        mc_median = mc_df.median(axis=1)
+        mc_p10 = mc_df.quantile(0.1, axis=1)
+        mc_p90 = mc_df.quantile(0.9, axis=1)
+
+        forecast_index = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
+        forecast_df = pd.DataFrame({
+            "ExpSmooth": exp_forecast,
+            "AR1": ar_prices,
+            "MC_median": mc_median.values,
+            "MC_p10": mc_p10.values,
+            "MC_p90": mc_p90.values
+        }, index=forecast_index)
+
+        hist_tail = data["Close"].tail(60)
+        combined = pd.concat(
+            [hist_tail.rename("Historical"), forecast_df],
+            axis=0
+        )
+
+        fig_forecast = px.line(
+            combined,
+            x=combined.index,
+            y=["Historical", "ExpSmooth", "AR1", "MC_median", "MC_p10", "MC_p90"],
+            title=f"{benchmark_label} – forecasts & Monte Carlo bands",
+            labels={"value": "Price (USD)", "index": "Date", "variable": "Series"}
+        )
+        st.plotly_chart(fig_forecast, use_container_width=True)
+
+        st.caption("ExpSmooth = exponential smoothing level; AR1 = rolling AR(1) on returns; MC bands = 10th/90th percentiles of simulated paths.")
