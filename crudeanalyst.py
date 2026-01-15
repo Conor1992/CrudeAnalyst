@@ -450,18 +450,21 @@ mc_median = mc_df.median(axis=1)
 mc_p10 = mc_df.quantile(0.1, axis=1)
 mc_p90 = mc_df.quantile(0.9, axis=1)
 
+# Build the combined forecast dataframe
 forecast_df = pd.DataFrame({"Historical": data["Close"].tail(60)})
-forecast_df = forecast_df.append(
-    pd.DataFrame(
-        {
-            "ExpSmooth": exp_df["ExpSmooth"],
-            "AR1": ar_df["AR1"] if "AR1" in ar_df.columns else np.nan,
-            "MC_median": mc_median,
-            "MC_p10": mc_p10,
-            "MC_p90": mc_p90,
-        }
-    )
+
+future_block = pd.DataFrame(
+    {
+        "ExpSmooth": exp_df["ExpSmooth"],
+        "AR1": ar_df["AR1"] if "AR1" in ar_df.columns else np.nan,
+        "MC_median": mc_median,
+        "MC_p10": mc_p10,
+        "MC_p90": mc_p90,
+    }
 )
+
+forecast_df = pd.concat([forecast_df, future_block], axis=0)
+
 
 fig_forecast = px.line(
     forecast_df,
