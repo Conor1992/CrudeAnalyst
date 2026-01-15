@@ -2,70 +2,85 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import yfinance as yf
-import requests
-import warnings
+from datetime import date
 
-# Filter out the specific UserWarning from requests that yfinance might trigger
-warnings.filterwarnings(
-    "ignore",
-    message="For more information see: https://requests.readthedocs.io/en/latest/user/advanced/#advanced-usage",
-    category=UserWarning
+# ---------------------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="Crude Oil Analyst Dashboard",
+    layout="wide"
 )
 
-st.set_page_config(page_title="Crude Oil Analyst Dashboard", layout="wide")
-
-# -----------------------------
-# Sidebar
-# -----------------------------
-st.sidebar.header("Dashboard Controls")
-
-benchmark = st.sidebar.selectbox(
-    "Select Benchmark",
-    ["CL=F (WTI)", "BZ=F (Brent)"]
-)
-
-period = st.sidebar.selectbox(
-    "Select Time Period",
-    ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"]
-)
-
-# -----------------------------
-# Title
-# -----------------------------
 st.title("🛢️ Crude Oil Analyst Dashboard")
-st.caption("A workspace for monitoring crude markets, fundamentals, and macro drivers.")
+st.caption("Market monitoring and analytics using Yahoo Finance data only.")
 
-# -----------------------------
-# Market Data Section
-# -----------------------------
+# ---------------------------------------------------------
+# SIDEBAR CONTROLS
+# ---------------------------------------------------------
+st.sidebar.header("Controls")
+
+benchmark_map = {
+    "WTI (CL=F)": "CL=F",
+    "Brent (BZ=F)": "BZ=F"
+}
+
+benchmark_label = st.sidebar.selectbox(
+    "Select Benchmark",
+    list(benchmark_map.keys())
+)
+
+benchmark = benchmark_map[benchmark_label]
+
+# Date pickers
+start_date = st.sidebar.date_input(
+    "Start Date",
+    value=date(2023, 1, 1)
+)
+
+end_date = st.sidebar.date_input(
+    "End Date",
+    value=date.today()
+)
+
+if start_date >= end_date:
+    st.sidebar.error("Start date must be before end date.")
+
+# ---------------------------------------------------------
+# MARKET DATA SECTION
+# ---------------------------------------------------------
 st.subheader("📈 Benchmark Price Overview")
 
 ticker = yf.Ticker(benchmark)
-hist = ticker.history(period=period)
 
-fig = px.line(
-    hist,
-    x=hist.index,
-    y="Close",
-    title=f"{benchmark} Price Trend",
-    labels={"Close": "Price (USD)", "index": "Date"}
-)
+try:
+    hist = ticker.history(start=start_date, end=end_date, interval="1d")
 
-st.plotly_chart(fig, use_container_width=True)
+    if hist.empty:
+        st.error("No data returned for the selected date range.")
+    else:
+        fig = px.line(
+            hist,
+            x=hist.index,
+            y="Close",
+            title=f"{benchmark_label} Price Trend",
+            labels={"Close": "Price (USD)", "index": "Date"}
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Latest Price", f"${hist['Close'][-1]:.2f}")
-with col2:
-    st.metric("Daily Change", f"{hist['Close'][-1] - hist['Close'][-2]:.2f}")
-with col3:
-    pct = (hist['Close'][-1] / hist['Close'][0] - 1) * 100
-    st.metric("Period Return", f"{pct:.2f}%")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Latest Price", f"${hist['Close'][-1]:.2f}")
+        col2.metric("Daily Change", f"{hist['Close'][-1] - hist['Close'][-2]:.2f}")
+        pct = (hist['Close'][-1] / hist['Close'][0] - 1) * 100
+        col3.metric("Return Over Period", f"{pct:.2f}%")
 
-# -----------------------------
-# Supply & Demand Indicators
-# -----------------------------
-st.subheader("⚖️ Supply & Demand Indicators (Manual Inputs)")
+except Exception as e:
+    st.error(f"Error fetching market data: {e}")
+
+# ---------------------------------------------------------
+# SUPPLY & DEMAND INPUTS
+# ---------------------------------------------------------
+st.subheader("⚖️ Supply & Demand Indicators")
 
 colA, colB = st.columns(2)
 
@@ -81,10 +96,10 @@ with colB:
 
 st.success("Supply & demand inputs updated.")
 
-# -----------------------------
-# Crack Spread Calculator
-# -----------------------------
-st.subheader("🧮 Refining Margin (Crack Spread) Calculator")
+# ---------------------------------------------------------
+# CRACK SPREAD CALCULATOR
+# ---------------------------------------------------------
+st.subheader("🧮 3-2-1 Crack Spread Calculator")
 
 colC, colD, colE = st.columns(3)
 
@@ -98,31 +113,3 @@ with colE:
 crack_spread = (0.5 * gasoline_price + 0.5 * diesel_price) - crude_price
 
 st.metric("3-2-1 Crack Spread", f"${crack_spread:.2f}")
-
-# -----------------------------
-# News Feed
-# -----------------------------
-st.subheader("📰 Latest Oil Market News")
-
-def get_news():
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": "crude oil OR OPEC OR energy markets",
-        "sortBy": "publishedAt",
-        "language": "en",
-        "apiKey": "YOUR_NEWS_API_KEY"
-    }
-    try:
-        r = requests.get(url, params=params)
-        data = r.json()
-        return data.get("articles", [])
-    except:
-        return []
-
-articles = get_news()
-
-for a in articles[:5]:
-    st.write(f"### {a['title']}")
-    st.write(a['description'])
-    st.write(f"[Read more]({a['url']})")
-    st.write("---")
