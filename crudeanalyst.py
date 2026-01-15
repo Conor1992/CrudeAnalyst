@@ -516,3 +516,306 @@ st.download_button(
     file_name=f"{benchmark.replace('=','')}_with_indicators.csv",
     mime="text/csv"
 )
+
+# ---------------------------------------------------------
+# FUTURES CURVE (MULTI-CONTRACT + ANALYTICS)
+# ---------------------------------------------------------
+st.subheader("🧵 Futures curve & term structure analytics")
+
+curve_underlying = st.selectbox("Curve underlying", ["WTI", "Brent"])
+
+if curve_underlying == "WTI":
+    futures_contracts = {
+        "CL1": "CL=F",          # front month
+        "CL2": "CLM25.NYM",
+        "CL3": "CLZ25.NYM",
+        "CL4": "CLM26.NYM",
+        "CL5": "CLZ26.NYM"
+    }
+else:
+    futures_contracts = {
+        "BZ1": "BZ=F",          # front month
+        "BZ2": "BZM25.NYM",
+        "BZ3": "BZZ25.NYM",
+        "BZ4": "BZM26.NYM",
+        "BZ5": "BZZ26.NYM"
+    }
+
+curve_prices = {}
+for label, ticker in futures_contracts.items():
+    try:
+        df_curve = get_history(ticker, date.today() - timedelta(days=10), date.today())
+        if df_curve is not None and not df_curve.empty:
+            curve_prices[label] = df_curve["Close"][-1]
+    except Exception:
+        continue
+
+if curve_prices:
+    curve_df = pd.DataFrame(
+        {"Contract": list(curve_prices.keys()), "Price": list(curve_prices.values())}
+    )
+
+    # Basic curve plot
+    fig_curve = px.line(
+        curve_df,
+        x="Contract",
+        y="Price",
+        markers=True,
+        title=f"{curve_underlying} futures curve",
+        labels={"Price": "Price (USD/bbl)", "Contract": "Contract"}
+    )
+    st.plotly_chart(fig_curve, use_container_width=True)
+
+    # Carry (roll yield) between adjacent contracts
+    curve_df["Carry_%"] = curve_df["Price"].pct_change() * 100
+    st.write("Adjacent contract carry (roll yield, %):")
+    st.dataframe(curve_df[["Contract", "Carry_%"]])
+
+    # Curve shape: contango vs backwardation (front vs last)
+    front = curve_df["Price"].iloc[0]
+    back = curve_df["Price"].iloc[-1]
+    shape = "Contango" if back > front else "Backwardation"
+    st.metric("Curve shape", shape, f"{(back/front - 1)*100:.2f}% front→back")
+
+    # Simple calendar spreads (front vs next)
+    if len(curve_df) >= 2:
+        cal_spread = curve_df["Price"].iloc[0] - curve_df["Price"].iloc[1]
+        st.metric("Front–second calendar spread", f"{cal_spread:.2f} USD/bbl")
+
+    # Simple butterfly: CL1 - 2*CL3 + CL5 (or equivalent)
+    if len(curve_df) >= 5:
+        bf = (
+            curve_df["Price"].iloc[0]
+            - 2 * curve_df["Price"].iloc[2]
+            + curve_df["Price"].iloc[4]
+        )
+        st.metric("Simple butterfly (1–3–5)", f"{bf:.2f} USD/bbl")
+else:
+    st.info("No futures curve data available with current tickers. Adjust contract tickers in the code if needed.")
+
+# ---------------------------------------------------------
+# CRACK SPREAD SUITE
+# ---------------------------------------------------------
+st.subheader("🛠 Crack spreads (RBOB & Heating Oil)")
+
+rb = get_history("RB=F", start_date, end_date)   # RBOB gasoline
+ho = get_history("HO=F", start_date, end_date)   # Heating oil
+
+if not rb.empty and not ho.empty and not wti_data.empty:
+    crack_df = pd.DataFrame({
+        "WTI": wti_data["Close"],
+        "RBOB": rb["Close"],
+        "HO": ho["Close"]
+    }).dropna()
+
+    # 3-2-1 crack: (2*RBOB + 1*HO)/3 - WTI
+    crack_df["321_crack"] = ((2 * crack_df["RBOB"] + crack_df["HO"]) / 3) - crack_df["WTI"]
+
+    # 5-3-2 crack: (3*RBOB + 2*HO)/5 - WTI
+    crack_df["532_crack"] = ((3 * crack_df["RBOB"] + 2 * crack_df["HO"]) / 5) - crack_df["WTI"]
+
+    # Gasoline crack: RBOB - WTI
+    crack_df["gasoline_crack"] = crack_df["RBOB"] - crack_df["WTI"]
+
+    # Diesel crack: HO - WTI
+    crack_df["diesel_crack"] = crack_df["HO"] - crack_df["WTI"]
+
+    fig_crack = px.line(
+        crack_df,
+        x=crack_df.index,
+        y=["321_crack", "532_crack", "gasoline_crack", "diesel_crack"],
+        title="Crack spreads (USD/bbl)",
+        labels={"value": "Spread (USD/bbl)", "index": "Date", "variable": "Crack"}
+    )
+    st.plotly_chart(fig_crack, use_container_width=True)
+
+    st.metric("Latest 3-2-1 crack", f"{crack_df['321_crack'].iloc[-1]:.2f} USD/bbl")
+else:
+    st.info("Insufficient data to compute crack spreads for the selected dates.")
+
+# ---------------------------------------------------------
+# REGIME-SWITCHING (TREND VS MEAN-REVERSION)
+# ---------------------------------------------------------
+st.subheader("🧬 Trend vs mean-reversion regimes")
+
+ret_20 = data["Close"].pct_change().rolling(20).mean()
+vol_20 = data["Close"].pct_change().rolling(20).std()
+
+regime_df = pd.DataFrame({"ret_20": ret_20, "vol_20": vol_20}).dropna()
+
+def classify_trend(row):
+    if row["ret_20"] > 0 and row["vol_20"] < vol_20.median():
+        return "Trending up"
+    elif row["ret_20"] < 0 and row["vol_20"] < vol_20.median():
+        return "Trending down"
+    else:
+        return "Mean-reverting / choppy"
+
+regime_df["Regime"] = regime_df.apply(classify_trend, axis=1)
+regime_counts = regime_df["Regime"].value_counts()
+
+st.bar_chart(regime_counts)
+
+current_regime = regime_df["Regime"].iloc[-1]
+st.metric("Current price regime", current_regime)
+
+# ---------------------------------------------------------
+# PRICE ELASTICITY & FACTOR DECOMPOSITION
+# ---------------------------------------------------------
+st.subheader("📐 Price elasticity & factor decomposition")
+
+# Fetch factors: USD index and S&P 500
+usd_df = get_history("DX-Y.NYB", start_date, end_date)
+spx_df = get_history("^GSPC", start_date, end_date)
+
+if not usd_df.empty and not spx_df.empty:
+    fac_df = pd.DataFrame({
+        "Crude": data["Close"],
+        "USD": usd_df["Close"],
+        "SPX": spx_df["Close"]
+    }).dropna()
+
+    fac_ret = fac_df.pct_change().dropna()
+
+    # Simple betas via OLS (no external libs)
+    X = np.column_stack([fac_ret["USD"], fac_ret["SPX"], np.ones(len(fac_ret))])
+    y = fac_ret["Crude"].values
+
+    # Solve (X'X)b = X'y
+    beta = np.linalg.lstsq(X, y, rcond=None)[0]
+    beta_usd, beta_spx, alpha = beta
+
+    col_f1, col_f2, col_f3 = st.columns(3)
+    col_f1.metric("Beta to USD", f"{beta_usd:.3f}")
+    col_f2.metric("Beta to S&P 500", f"{beta_spx:.3f}")
+    col_f3.metric("Alpha (daily)", f"{alpha:.5f}")
+
+    st.caption("Betas estimated from daily returns via simple OLS (Crude ~ USD + SPX).")
+else:
+    st.info("Not enough data to estimate factor betas (USD/SPX).")
+
+# ---------------------------------------------------------
+# RISK METRICS: VaR, CVaR, DRAWDOWN
+# ---------------------------------------------------------
+st.subheader("⚠️ Risk metrics (VaR, CVaR, drawdown)")
+
+if not returns.empty:
+    confidence = st.slider("VaR confidence level", 0.90, 0.99, 0.95, step=0.01)
+
+    # Historical VaR
+    var_level = np.quantile(returns, 1 - confidence)
+    var_pct = var_level * 100
+
+    # CVaR (Expected Shortfall)
+    tail_losses = returns[returns <= var_level]
+    cvar_level = tail_losses.mean() if len(tail_losses) > 0 else np.nan
+    cvar_pct = cvar_level * 100
+
+    # Max drawdown
+    cum = (1 + returns).cumprod()
+    peak = cum.cummax()
+    drawdown = (cum - peak) / peak
+    max_dd = drawdown.min() * 100
+
+    col_r1, col_r2, col_r3 = st.columns(3)
+    col_r1.metric(f"{int(confidence*100)}% 1-day VaR", f"{var_pct:.2f}%")
+    col_r2.metric(f"{int(confidence*100)}% 1-day CVaR", f"{cvar_pct:.2f}%")
+    col_r3.metric("Max drawdown (period)", f"{max_dd:.2f}%")
+
+    fig_dd = px.line(
+        drawdown,
+        x=drawdown.index,
+        y=drawdown.values,
+        title="Drawdown over time",
+        labels={"x": "Date", "y": "Drawdown"}
+    )
+    st.plotly_chart(fig_dd, use_container_width=True)
+else:
+    st.info("Not enough return data to compute risk metrics.")
+
+# ---------------------------------------------------------
+# FORECASTING & SIMULATIONS (EXP, AR1, MONTE CARLO)
+# ---------------------------------------------------------
+st.subheader("🔮 Forecasting & simulations")
+
+horizon_days = st.slider("Forecast horizon (days)", 5, 60, 30)
+
+last_date = data.index[-1]
+last_price = data["Close"][-1]
+
+# Exponential smoothing forecast (on price)
+alpha = st.slider("Exponential smoothing alpha", 0.01, 0.5, 0.2)
+level = data["Close"].iloc[0]
+for p in data["Close"]:
+    level = alpha * p + (1 - alpha) * level
+exp_forecast_prices = [level for _ in range(horizon_days)]
+exp_dates = [last_date + timedelta(days=i) for i in range(1, horizon_days + 1)]
+exp_df = pd.DataFrame({"ExpSmooth": exp_forecast_prices}, index=exp_dates)
+
+# Rolling AR(1) forecast on returns
+window_ar = 60
+if len(returns) > window_ar + 1:
+    r_window = returns.tail(window_ar)
+    r_lag = r_window.shift(1).dropna()
+    r_curr = r_window.iloc[1:]
+    phi = (r_lag * r_curr).sum() / (r_lag ** 2).sum()
+    last_r = returns.iloc[-1]
+    ar_returns = [phi ** i * last_r for i in range(1, horizon_days + 1)]
+    ar_prices = []
+    p = last_price
+    for r in ar_returns:
+        p = p * (1 + r)
+        ar_prices.append(p)
+    ar_df = pd.DataFrame({"AR1": ar_prices}, index=exp_dates)
+else:
+    ar_df = pd.DataFrame(index=exp_dates)
+
+# Monte Carlo simulation
+mc_paths = st.slider("Monte Carlo paths", 50, 500, 200)
+mu = returns.mean()
+sigma = returns.std()
+dt = 1.0
+
+mc_matrix = np.zeros((horizon_days, mc_paths))
+for j in range(mc_paths):
+    prices = [last_price]
+    for i in range(1, horizon_days):
+        shock = np.random.normal(mu * dt, sigma * np.sqrt(dt))
+        prices.append(prices[-1] * (1 + shock))
+    mc_matrix[:, j] = prices
+
+mc_index = exp_dates
+mc_df = pd.DataFrame(mc_matrix, index=mc_index)
+mc_median = mc_df.median(axis=1)
+mc_p10 = mc_df.quantile(0.1, axis=1)
+mc_p90 = mc_df.quantile(0.9, axis=1)
+
+# Combine historical + forecasts
+forecast_df = pd.DataFrame({"Historical": data["Close"].tail(60)})
+future_block = pd.DataFrame(
+    {
+        "ExpSmooth": exp_df["ExpSmooth"],
+        "AR1": ar_df["AR1"] if "AR1" in ar_df.columns else np.nan,
+        "MC_median": mc_median,
+        "MC_p10": mc_p10,
+        "MC_p90": mc_p90,
+    }
+)
+forecast_df = pd.concat([forecast_df, future_block], axis=0)
+
+fig_forecast = px.line(
+    forecast_df,
+    x=forecast_df.index,
+    y=["Historical", "ExpSmooth", "AR1", "MC_median", "MC_p10", "MC_p90"],
+    title=f"{benchmark_label} – forecasts & Monte Carlo bands",
+    labels={"value": "Price (USD)", "index": "Date", "variable": "Series"}
+)
+st.plotly_chart(fig_forecast, use_container_width=True)
+
+st.caption("ExpSmooth = exponential smoothing level; AR1 = rolling AR(1) on returns; MC bands = 10th/90th percentiles of simulated paths.")
+
+
+
+
+
+
